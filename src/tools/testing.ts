@@ -16,6 +16,7 @@
 
 import { z } from 'zod';
 import { defineTool } from './tool.js';
+import { locatorOrSelectorAsSelector } from '../upstream/locatorParser.js';
 
 const generateTestSchema = z.object({
   name: z.string().describe('The name of the test'),
@@ -62,6 +63,60 @@ const instructions = (params: { name: string, description: string, steps: string
   ...params.steps.map((step, index) => `- ${index + 1}. ${step}`),
 ].join('\n');
 
+
+const validateLocatorSchema = z.object({
+  locator: z.string().describe('Locator to validate. ARIA locators are prefered, e.g. "getByRole(\'button\', { name: \'Sign in\' })". Do not include the "page." prefix.'),
+  element: z.string().describe('Human-readable element description used to obtain permission to interact with the element'),
+  ref: z.string().describe('Exact target element reference from the page snapshot that will be used to validate the locator'),
+  testIdAttributeName: z.string().optional().describe('Optional test ID attribute name to use for locator generation (by default, "data-testid" is used)'),
+});
+
+const validateLocator = defineTool({
+  capability: 'testing',
+  schema: {
+    name: 'browser_validate_locator',
+    title: 'Validate locator',
+    description: `Checks if the locator evaluates into the specified ref.`,
+    inputSchema: validateLocatorSchema,
+    type: 'readOnly'
+  },
+
+  handle: async (context, params) => {
+    const tab = context.currentTabOrDie();
+    const snapshot = tab.snapshotOrDie();
+
+    const refLocator = snapshot.refLocator(params.ref);
+
+    const selector = locatorOrSelectorAsSelector('javascript', params.locator, params.testIdAttributeName ?? 'data-testid');
+    const locator = tab.page.locator(selector);
+
+    const text = await locator.evaluateAll((elems, refElem) => {
+      if (!refElem)
+        return ['No reference element found'];
+      if (elems.length === 0)
+        return ['Locator does not match any elements'];
+      if (elems.length === 1 && elems[0] === refElem)
+        return ['Locator is valid'];
+      if (elems.length > 1 && elems.includes(refElem))
+        return ['Locator is ambiguous, it matches the reference element but also other elements'];
+      return ['Locator is invalid, it does not match the reference element'];
+    }, await refLocator.elementHandle());
+
+    return {
+      resultOverride: {
+        content: [{
+          type: 'text',
+          text: text.join('\n'),
+        }],
+      },
+      code: [],
+      captureSnapshot: false,
+      waitForNetwork: false,
+    };
+  },
+});
+
 export default [
   generateTest,
+  validateLocator,
 ];
